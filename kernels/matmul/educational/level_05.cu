@@ -31,7 +31,6 @@ __global__ void kernel(const __grid_constant__ matmul_globals g) {
     st_bf<BLOCK_SIZE,BLOCK_SIZE> &Bs = al.allocate<st_bf<BLOCK_SIZE,BLOCK_SIZE>>(); 
     
     rt_fl<16,BLOCK_SIZE> C_accum;
-    rt_fl<16,BLOCK_SIZE> C_accum_cpy;
 
     int bx = blockIdx.x; 
     int by = blockIdx.y; 
@@ -40,7 +39,7 @@ __global__ void kernel(const __grid_constant__ matmul_globals g) {
 
     // int condition = (threadIdx.x == 0 && threadIdx.y == 0 & blockIdx.x == 0);
 
-    zero(C_accum_cpy);
+    zero(C_accum);
     int num_tiles = (g.N + BLOCK_SIZE - 1) / BLOCK_SIZE;
     for (int tile = 0; tile < num_tiles; ++tile) {
         warpgroup::load(As, g.A, {0, 0, row, tile});
@@ -48,10 +47,8 @@ __global__ void kernel(const __grid_constant__ matmul_globals g) {
         __syncthreads();
         warpgroup::mma_AB(C_accum, As, Bs);
         warpgroup::mma_async_wait();
-        add(C_accum_cpy, C_accum_cpy, C_accum);
-        zero(C_accum);
     }
-    warpgroup::store(g.C, C_accum_cpy, {0, 0, row, col});
+    warpgroup::store(g.C, C_accum, {0, 0, row, col});
 }
 
 // launch kernel

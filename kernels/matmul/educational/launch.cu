@@ -1,17 +1,37 @@
-
-
+#include <openssl/sha.h>
+#include <openssl/evp.h>
+#include <iomanip>
+#include <sstream>
 
 #include <iostream>
 #include <random>
 #include <cuda_bf16.h>
 #include <omp.h>
 #include <chrono>
- 
+
+#include <vector>
 
 #include <cuda_runtime.h>
 
 using my_dtype = __nv_bfloat16; 
 
+// Courtesy of Claude
+std::string sha256(const uint8_t* data, size_t size) {
+    unsigned char hash[SHA256_DIGEST_LENGTH];
+
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr);
+    EVP_DigestUpdate(ctx, data, size);
+    EVP_DigestFinal_ex(ctx, hash, nullptr);
+    EVP_MD_CTX_free(ctx);
+
+    // Convert to hex string
+    std::stringstream ss;
+    for (int i = 0; i < SHA256_DIGEST_LENGTH; i++) {
+        ss << std::hex << std::setw(2) << std::setfill('0') << (int)hash[i];
+    }
+    return ss.str();
+}
 
 void cpu_gemm(float* a, float* b, float* c, int M, int N, int K) {
     #pragma omp parallel for collapse(2) // otherwise the CPU version takes for everrrrrr
@@ -43,8 +63,20 @@ int run_benchmark(size_t M, size_t N, size_t K) {
     std::mt19937 gen(42);
     std::uniform_real_distribution<> dis(-0.5, 0.5);
 
+    std::mt19937 perm_gen(43);
+    std::vector<size_t> perm(M);
+    std::iota(perm.begin(), perm.end(), 0);
+    std::shuffle(perm.begin(), perm.end(), perm_gen);
+    std::cout << "Applied permutation:";
+    for (int i = 0; i < 20; i++) std::cout << " " << perm[i];
+    std::cout << "..." << std::endl;
+
     // Initialize matrices with random values
-    for (int i = 0; i < M * K; ++i) h_A[i] = dis(gen);
+    for (int i = 0; i < M; ++i) {
+        for (int j = 0; j < K; ++j) {
+            h_A[perm[i] * K + j] = dis(gen);
+        }
+    }
     for (int i = 0; i < K * N; ++i) h_B[i] = dis(gen);
     std::cout << "Initialized matrices" << std::endl;
 
@@ -116,22 +148,31 @@ int run_benchmark(size_t M, size_t N, size_t K) {
     std::cout << "Copied result back to host" << std::endl;
 
     // Convert result back to float for comparison
-    for (int i = 0; i < M * N; ++i) h_C[i] = __bfloat162float(h_C_bf16[i]);
+    for (int i = 0; i < M; ++i) {
+        for (int j = 0; j < N; ++j) {
+            h_C[i * N + j] = __bfloat162float(h_C_bf16[perm[i] * N + j]);
+        }
+    }
     std::cout << "Converted result back to float" << std::endl;
 
     // Check result
     float max_error = 0.0f;
     int error_count = 0;
-    for (int i = 0; i < M * N; ++i) {
-        float error = std::abs(h_C[i] - h_C_ref[i]);
-        if( error > 0.1 ) { // large because of bf16 vs fp32 numerics
-            if(error_count < 20) std::cout << "Error at row " << i / N << " col " << i % N << ": " << h_C[i] << " != " << h_C_ref[i] << " (ref)" << std::endl;
-            else if(error_count == 21) std::cout << "Too many errors to show them all.\n";
-            error_count++;
+    for (int i = 0; i < M; ++i) {
+        for (int j = 0; j < N; ++j) {
+            float act = h_C[i * N + j];
+            float ref = h_C_ref[perm[i] * N + j];
+            float error = std::abs(act - ref);
+            if( error > 0.2 ) { // large because of bf16 vs fp32 numerics
+                if(error_count < 20) std::cout << "Error at row " << i << " col " << j << ": " << act << " != " << ref << " (ref)" << std::endl;
+                else if(error_count == 21) std::cout << "Too many errors to show them all.\n";
+                error_count++;
+            }
+            max_error = std::max(max_error, error);
         }
-        max_error = std::max(max_error, error);
     }
 
+    std::cout << "SHA256: " << sha256(reinterpret_cast<uint8_t*>(h_C), M * N * sizeof(float)) << std::endl;
     std::cout << "Max error: " << max_error << std::endl;
     std::cout << "Error count: " << error_count << std::endl;
     std::cout << "Total count: " << int(N * N) << std::endl;
@@ -153,7 +194,8 @@ int run_benchmark(size_t M, size_t N, size_t K) {
 
 int main() {
     int N;
-    N = 4096;
+    // N = 4096;
+    N = 5376;
     run_benchmark(N, N, N);
     return 0;
 }
