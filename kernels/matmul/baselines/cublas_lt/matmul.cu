@@ -7,6 +7,11 @@
 #include <iostream>
 #include <iomanip>
 
+#include <openssl/sha.h>
+#include <openssl/evp.h>
+#include <iomanip>
+#include <sstream>
+
 void check(cudaError_t error) {
     if (error != cudaSuccess) {
         std::cerr << "CUDA error: " << cudaGetErrorString(error) << std::endl;
@@ -21,6 +26,23 @@ void checkCublas(cublasStatus_t status) {
     }
 }
 
+std::string sha256(const uint8_t* data, size_t size) {
+    unsigned char hash[SHA256_DIGEST_LENGTH];
+
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr);
+    EVP_DigestUpdate(ctx, data, size);
+    EVP_DigestFinal_ex(ctx, hash, nullptr);
+    EVP_MD_CTX_free(ctx);
+
+    // Convert to hex string
+    std::stringstream ss;
+    for (int i = 0; i < SHA256_DIGEST_LENGTH; i++) {
+        ss << std::hex << std::setw(2) << std::setfill('0') << (int)hash[i];
+    }
+    return ss.str();
+}
+
 double benchmark_matmul(int matrix_size) {
     std::cout << "\nBenchmarking size: " << matrix_size << "x" << matrix_size << std::endl;
     
@@ -31,15 +53,16 @@ double benchmark_matmul(int matrix_size) {
     
     // Allocate host memory
     std::random_device rd;
-    std::mt19937 gen(rd());
-    std::normal_distribution<float> dist(0.0f, std::sqrt(std::sqrt(1.0f/k)));
+    std::mt19937 gen(42);
+    std::uniform_real_distribution<> dis(-0.5, 0.5);
+
     std::vector<__nv_bfloat16> h_A(m * k);
     std::vector<__nv_bfloat16> h_B(k * n);
     for(int i = 0; i < m * k; i++) {
-        h_A[i] = __float2bfloat16(dist(gen));
+        h_A[i] = __float2bfloat16(dis(gen));
     }
     for(int i = 0; i < k * n; i++) {
-        h_B[i] = __float2bfloat16(dist(gen));
+        h_B[i] = __float2bfloat16(dis(gen));
     }
     std::vector<__nv_bfloat16> h_C(m * n, __nv_bfloat16(0.0f));
     
@@ -64,10 +87,15 @@ double benchmark_matmul(int matrix_size) {
     checkCublas(cublasLtMatrixLayoutCreate(&matA, CUDA_R_16BF, m, k, m));
     checkCublas(cublasLtMatrixLayoutCreate(&matB, CUDA_R_16BF, k, n, k));
     checkCublas(cublasLtMatrixLayoutCreate(&matC, CUDA_R_16BF, m, n, m));
+
+    cublasLtOrder_t row_major = CUBLASLT_ORDER_ROW;
+    checkCublas(cublasLtMatrixLayoutSetAttribute(matA, CUBLASLT_MATRIX_LAYOUT_ORDER, &row_major, sizeof(row_major)));
+    checkCublas(cublasLtMatrixLayoutSetAttribute(matB, CUBLASLT_MATRIX_LAYOUT_ORDER, &row_major, sizeof(row_major)));
+    checkCublas(cublasLtMatrixLayoutSetAttribute(matC, CUBLASLT_MATRIX_LAYOUT_ORDER, &row_major, sizeof(row_major)));
     
     // Configure matrix multiplication descriptor
     cublasLtMatmulDesc_t matmulDesc;
-    checkCublas(cublasLtMatmulDescCreate(&matmulDesc, CUBLAS_COMPUTE_32F_FAST_16BF, CUDA_R_32F));
+    checkCublas(cublasLtMatmulDescCreate(&matmulDesc, CUBLAS_COMPUTE_32F, CUDA_R_32F));
     
     // Set matrix operation parameters
     const float alpha = 1.0f;
@@ -147,6 +175,7 @@ double benchmark_matmul(int matrix_size) {
     // Verify correctness on random indices
     // Copy matrices back to host
     check(cudaMemcpy(h_C.data(), d_C, m * n * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost));
+    std::cout << "SHA256: " << sha256(reinterpret_cast<uint8_t*>(h_C.data()), m * n * sizeof(__nv_bfloat16)) << std::endl;
 
     // Seed random number generator
     std::uniform_int_distribution<> dis_m(0, m-1);
@@ -160,12 +189,12 @@ double benchmark_matmul(int matrix_size) {
         // Calculate expected value
         float expected = 0.0f;  // Use float for intermediate computation
         for (int j = 0; j < k; j++) {
-            expected += __bfloat162float(h_A[j * m + row]) * __bfloat162float(h_B[col * k + j]);
+            expected += __bfloat162float(h_A[row * k + j]) * __bfloat162float(h_B[j * n + col]);
         }
         expected = alpha * expected + beta * __bfloat162float(h_C[row * n + col]);
         
         // Get actual value and convert to float for comparison
-        float actual = __bfloat162float(h_C[col * m + row]);
+        float actual = __bfloat162float(h_C[row * n + col]);
         
         // Compare with larger tolerance due to bf16 precision
         float rel_error = std::abs(actual - expected) / std::abs(expected);
@@ -205,7 +234,7 @@ int main() {
     std::cout << "Running on GPU: " << deviceProp.name << std::endl;
     
     // Matrix sizes to benchmark
-    std::vector<int> sizes = {1024, 2048, 4096, 8192, 16384};
+    std::vector<int> sizes = {5376};
     
     // Run benchmarks
     for (int size : sizes) {
