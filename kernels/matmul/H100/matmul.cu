@@ -1,6 +1,28 @@
 #include "kittens.cuh"
 #include "prototype.cuh"
 
+#include <openssl/sha.h>
+#include <openssl/evp.h>
+#include <iomanip>
+#include <sstream>
+
+std::string sha256(const uint8_t* data, size_t size) {
+    unsigned char hash[SHA256_DIGEST_LENGTH];
+
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    EVP_DigestInit_ex(ctx, EVP_sha256(), nullptr);
+    EVP_DigestUpdate(ctx, data, size);
+    EVP_DigestFinal_ex(ctx, hash, nullptr);
+    EVP_MD_CTX_free(ctx);
+
+    // Convert to hex string
+    std::stringstream ss;
+    for (int i = 0; i < SHA256_DIGEST_LENGTH; i++) {
+        ss << std::hex << std::setw(2) << std::setfill('0') << (int)hash[i];
+    }
+    return ss.str();
+}
+
 using namespace kittens;
 using namespace kittens::prototype;
 using namespace kittens::prototype::lcf;
@@ -228,6 +250,7 @@ int run_benchmark(size_t M, size_t N, size_t K) {
     cudaMemcpy(h_C_bf16, d_C, M*N*2, cudaMemcpyDeviceToHost);
 
     std::cout << "Copied result back to host" << std::endl;
+    std::cout << "SHA256: " << sha256(reinterpret_cast<uint8_t*>(h_C_bf16), M * N * sizeof(__nv_bfloat16)) << std::endl;
 
     // Convert result back to float for comparison
     for (int i = 0; i < M * N; ++i) h_C[i] = __bfloat162float(h_C_bf16[i]);
@@ -272,7 +295,7 @@ int main() {
     // run_benchmark<matmul_template<8>>(4096, 4096, 4096, Rblocks, Cblocks, Rblocks192, Cblocks192);
     // run_benchmark<matmul_template<12>>(4096, 4096, 4096, Rblocks, Cblocks, Rblocks192, Cblocks192);
     int N;
-    N = 4096;
+    N = 5376;
     run_benchmark<matmul_template<2,4,8>>(N, N, N);
     // N = 3072;
     // run_benchmark<matmul_template<2,4,8>>(N, N, N);
